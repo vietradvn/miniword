@@ -94,10 +94,14 @@ namespace MiniSoftware
 
             foreach (var tr in trs)
             {
-                var innerText = tr.InnerText.Replace("{{foreach", "").Replace("endforeach}}", "")
+                // Remove {{TableStart:key}} and {{TableEnd:key}} markers before matching
+                // These markers confuse the regex when adjacent to {{key.field}} placeholders
+                var innerText = Regex.Replace(tr.InnerText, @"\{\{TableStart:\w+\}\}", "")
+                    .Replace("{{foreach", "").Replace("endforeach}}", "")
                     .Replace("{{if(", "").Replace(")if", "").Replace("endif}}", "");
+                innerText = Regex.Replace(innerText, @"\{\{TableEnd:\w+\}\}", "");
 
-                // 匹配list数据，格式“Items.PropName”
+                // 匹配list数据，格式"Items.PropName"
                 var matchs = (Regex.Matches(innerText, "(?<={{).*?\\..*?(?=}})")
                     .Cast<Match>().GroupBy(x => x.Value).Select(varGroup => varGroup.First().Value)).ToArray();
                 if (matchs.Length > 0)
@@ -152,6 +156,10 @@ namespace MiniSoftware
 
                             ReplaceIfStatements(newTr, tags: dic);
 
+                            // Remove {{TableStart:key}} and {{TableEnd:key}} tags from the cloned row
+                            // These tags are markers, not data placeholders
+                            RemoveTableTags(newTr, listLevelKeys[0]);
+
                             ReplaceText(newTr, docx, tags: dic);
                             //Fix #47 The table should be inserted at the template tag position instead of the last row
                             if (table.Contains(tr))
@@ -179,6 +187,9 @@ namespace MiniSoftware
                         }
 
                         ReplaceIfStatements(tr, tags: tagObj.ToDictionary());
+
+                        // Remove {{TableStart:key}} and {{TableEnd:key}} tags
+                        RemoveTableTags(tr, listLevelKeys[0]);
 
                         ReplaceText(tr, docx, tags: dic);
                     }
@@ -1198,6 +1209,25 @@ namespace MiniSoftware
                 //use default size 81920
                 await st.CopyToAsync(ms, 81920, token).ConfigureAwait(false);
                 return ms.ToArray();
+            }
+        }
+
+        /// <summary>
+        /// Removes {{TableStart:key}} and {{TableEnd:key}} marker tags from all text runs in an element.
+        /// These tags are row markers, not data placeholders — they should not appear in output.
+        /// </summary>
+        private static void RemoveTableTags(OpenXmlElement element, string key)
+        {
+            var startTag = $"{{{{TableStart:{key}}}}}";
+            var endTag = $"{{{{TableEnd:{key}}}}}";
+            foreach (var text in element.Descendants<Text>().ToList())
+            {
+                if (text.Text.Contains(startTag))
+                    text.Text = text.Text.Replace(startTag, "");
+                if (text.Text.Contains(endTag))
+                    text.Text = text.Text.Replace(endTag, "");
+                if (string.IsNullOrEmpty(text.Text))
+                    text.Parent?.RemoveChild(text);
             }
         }
     }
