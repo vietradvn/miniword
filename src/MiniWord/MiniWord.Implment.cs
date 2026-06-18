@@ -731,6 +731,9 @@ namespace MiniSoftware
                 endParagraph?.Remove();
                 // 循环体最后一个元素，用于新元素插入定位
                 var lastEleInLoop = betweenEles.LastOrDefault();
+                // Track the element before the foreach block, as a fallback insertion point
+                // in case all loop elements are removed by @if processing
+                var insertBeforeEle = betweenEles.FirstOrDefault()?.PreviousSibling();
                 var copyLoopEles = betweenEles.Select(e => e.CloneNode(true)).ToList();
                 // 需要循环的数据
                 var foreachList = GetObjVal(data, foreachDataKey);
@@ -759,6 +762,20 @@ namespace MiniSoftware
                         // @if代码块替换
                         ReplaceIfStatements(xmlElement, loopEles, foreachDataDict);
 
+                        // After @if processing, some elements may have been removed from the DOM.
+                        // Update lastEleInLoop to ensure it's still a valid insertion point.
+                        var remaining = loopEles.Where(e => e.Parent != null).ToList();
+                        if (remaining.Count > 0)
+                        {
+                            lastEleInLoop = remaining.Last();
+                        }
+                        else if (lastEleInLoop?.Parent == null)
+                        {
+                            // All loop elements were removed by @if, and lastEleInLoop is detached.
+                            // Re-anchor: insert after the element before the foreach block.
+                            lastEleInLoop = insertBeforeEle;
+                        }
+
                         // 2.2 新增一个循环体元素
                         if (list.Count - 1 > i)
                         {
@@ -766,7 +783,15 @@ namespace MiniSoftware
                             foreach (var ele in copyLoopEles)
                             {
                                 var newEle = ele.CloneNode(true);
-                                xmlElement.InsertAfter(newEle, lastEleInLoop);
+                                if (lastEleInLoop != null && lastEleInLoop.Parent != null)
+                                {
+                                    xmlElement.InsertAfter(newEle, lastEleInLoop);
+                                }
+                                else
+                                {
+                                    // Fallback: prepend to body (should rarely happen)
+                                    xmlElement.InsertBefore(newEle, xmlElement.FirstChild);
+                                }
                                 lastEleInLoop = newEle;
                                 loopEles.Add(newEle);
                             }
@@ -836,11 +861,11 @@ namespace MiniSoftware
 
                 //var tagValue = tags[statement[1]] ?? "NULL";
                 var tagValue1 = GetObjVal(tags, statement[1]) ?? "NULL";
-                var tagValue2 = GetObjVal(tags, statement[3]) ?? statement[3];
+                var tagValue2 = statement.Length == 4 ? (GetObjVal(tags, statement[3]) ?? statement[3]) : null;
 
                 var checkStatement = statement.Length == 4
                     ? EvaluateStatement(tagValue1.ToString(), statement[2], tagValue2.ToString())
-                    : !bool.Parse(tagValue1.ToString());
+                    : bool.Parse(tagValue1.ToString());
 
                 if (!checkStatement)
                 {
