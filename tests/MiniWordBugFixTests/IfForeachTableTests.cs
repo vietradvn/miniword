@@ -15,7 +15,7 @@ public class IfForeachTableTests
     private readonly ITestOutputHelper _output;
     private static readonly string OutputDir = Path.Combine(Path.GetTempPath(), "MiniWordBugFixTests");
     private const string ValidateDir = "/tmp/docx_validate";
-    private const string DockerContainer = "iis-print-dev";
+    private const string DockerContainer = "eis-print-dev";
 
     public IfForeachTableTests(ITestOutputHelper output)
     {
