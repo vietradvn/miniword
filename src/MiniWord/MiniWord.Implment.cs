@@ -737,9 +737,21 @@ namespace MiniSoftware
                 if (!match.Success) throw new Exception($"@Foreach循环未找到对应数据");
                 var foreachDataKey = match.Groups[1].Value;
 
+                // beginParagraph và endParagraph có thể là CÙNG một Paragraph khi người soạn đặt
+                // @foreach và @endforeach trên cùng một đoạn (dùng Shift+Enter / dán HTML có <br>
+                // thay vì xuống đoạn mới). Khi đó Remove() lần thứ hai chạy trên element đã bị
+                // gỡ khỏi cây và ném "The parent of this element is null" — thông báo vô nghĩa
+                // với người dùng. Báo lỗi rõ ràng để họ biết phải sửa gì trong file Word.
+                if (ReferenceEquals(beginParagraph, endParagraph))
+                {
+                    throw new InvalidOperationException(
+                        "@foreach and @endforeach must be on separate paragraphs. " +
+                        "In Word press Enter (new paragraph) instead of Shift+Enter (line break) between them.");
+                }
+
                 // 删除关键字文本行
-                beginParagraph?.Remove();
-                endParagraph?.Remove();
+                if (beginParagraph?.Parent != null) beginParagraph.Remove();
+                if (endParagraph?.Parent != null) endParagraph.Remove();
                 // 循环体最后一个元素，用于新元素插入定位
                 var lastEleInLoop = betweenEles.LastOrDefault();
                 // Track the element before the foreach block, as a fallback insertion point
