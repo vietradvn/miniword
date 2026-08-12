@@ -241,6 +241,21 @@ namespace MiniSoftware
             if (objSource == null) return null;
 
             var nextPropNames = propNames.Skip(1).ToArray();
+
+            // Hỗ trợ array index: segment "content[0]" trên IList/array (vd {{report.content[0].description}}).
+            // Phải xử lý TRƯỚC nhánh IDictionary vì "content[0]" không phải key trong dict.
+            var idxOpen = propNames[0].IndexOf('[');
+            if (idxOpen > 0 && propNames[0].EndsWith("]"))
+            {
+                var baseName = propNames[0].Substring(0, idxOpen);
+                var indexStr = propNames[0].Substring(idxOpen + 1, propNames[0].Length - idxOpen - 2);
+                var listSource = ResolveBase(objSource, baseName);
+                var listVal = GetListItem(listSource, indexStr);
+                if (propNames.Length > 1)
+                    return GetObjVal(listVal, nextPropNames);
+                return listVal;
+            }
+
             if (objSource is IDictionary)
             {
                 var dict = objSource as IDictionary;
@@ -266,6 +281,46 @@ namespace MiniSoftware
             if (propNames.Length == 1)
                 return prop1Val;
             return GetObjVal(prop1Val, nextPropNames);
+        }
+
+        /// <summary>
+        /// Lấy value cho segment trước index — có thể là property trên object hoặc key trong dict.
+        /// </summary>
+        private static object ResolveBase(object objSource, string baseName)
+        {
+            if (objSource is IDictionary dictBase && dictBase.Contains(baseName))
+                return dictBase[baseName];
+
+            var prop = objSource.GetType().GetProperty(baseName);
+            return prop == null ? null : prop.GetValue(objSource);
+        }
+
+        /// <summary>
+        /// Lấy phần tử theo index từ IList/array. Null-safe: không phải list, index ngoài phạm vi → null.
+        /// </summary>
+        private static object GetListItem(object listSource, string indexStr)
+        {
+            if (listSource == null) return null;
+            int index;
+            if (!int.TryParse(indexStr, out index)) return null;
+
+            var list = listSource as IList;
+            if (list != null)
+            {
+                if (index >= 0 && index < list.Count)
+                    return list[index];
+                return null;
+            }
+
+            var arr = listSource as Array;
+            if (arr != null)
+            {
+                if (index >= 0 && index < arr.Length)
+                    return arr.GetValue(index);
+                return null;
+            }
+
+            return null;
         }
 
         private static void AvoidSplitTagText(OpenXmlElement xmlElement)
@@ -543,8 +598,13 @@ namespace MiniSoftware
                     {
                         // 完全匹配
                         var isFullMatch = t.Text.Contains($"{{{{{tag.Key}}}}}");
-                        // 层级匹配，如{{A.B.C.D}}
-                        var partMatch = new Regex($".*{{{{({tag.Key}(\\.\\w+)+)}}}}.*").Match(t.Text);
+                        // 层级匹配，如{{A.B.C.D}} hoặc {{A.B[0].C}} — có thể nhiều placeholder cùng prefix trong 1 đoạn
+                        var partRegex = new Regex(@"\{\{(" + tag.Key + @"((\.[A-Za-z0-9_]+)|(\[\d+\]))+)\}\}");
+                        var partMatches = partRegex.Matches(t.Text)
+                            .Cast<Match>()
+                            .Where(m => m.Groups.Count > 1)
+                            .ToList();
+                        var partMatch = partMatches.FirstOrDefault();
 
                         if (!isFullMatch && tag.Value is List<MiniWordForeach> forTags)
                         {
@@ -558,7 +618,7 @@ namespace MiniSoftware
                             }
                         }
 
-                        if (isFullMatch || partMatch.Success)
+                        if (isFullMatch || (partMatch != null && partMatch.Success))
                         {
                             var key = isFullMatch ? tag.Key : partMatch.Groups[1].Value;
                             var value = isFullMatch ? tag.Value : GetObjVal(tags, key);
@@ -626,6 +686,14 @@ namespace MiniSoftware
                             else if (IsHyperLink(value))
                             {
                                 AddHyperLink(docx, run, value);
+                                t.Remove();
+                            }
+                            else if (value is MiniWordRichText || value is MiniWordRichText[])
+                            {
+                                var rich = value is MiniWordRichText
+                                    ? new[] { (MiniWordRichText)value }
+                                    : (MiniWordRichText[])value;
+                                AddRichText(run, rich);
                                 t.Remove();
                             }
                             else if (value is MiniWordColorText || value is MiniWordColorText[])
@@ -704,10 +772,27 @@ namespace MiniSoftware
                             }
                             else
                             {
-                                var newText = value is DateTime
-                                    ? ((DateTime)value).ToString("yyyy-MM-dd HH:mm:ss")
-                                    : value?.ToString();
-                                t.Text = t.Text.Replace($"{{{{{key}}}}}", newText);
+                                // Thay TẤT CẢ placeholder cùng prefix (vd {{patient.name}} + {{patient.gender}}
+                                // trong cùng 1 Text node) — trước đây chỉ thay match đầu tiên.
+                                if (partMatches.Count > 0)
+                                {
+                                    foreach (var pm in partMatches)
+                                    {
+                                        var nestedKey = pm.Groups[1].Value;
+                                        var nestedValue = GetObjVal(tags, nestedKey);
+                                        var nestedText = nestedValue is DateTime nestedDt
+                                            ? nestedDt.ToString("yyyy-MM-dd HH:mm:ss")
+                                            : nestedValue?.ToString();
+                                        t.Text = t.Text.Replace($"{{{{{nestedKey}}}}}", nestedText);
+                                    }
+                                }
+                                else
+                                {
+                                    var newText = value is DateTime
+                                        ? ((DateTime)value).ToString("yyyy-MM-dd HH:mm:ss")
+                                        : value?.ToString();
+                                    t.Text = t.Text.Replace($"{{{{{key}}}}}", newText);
+                                }
                             }
                         }
                     }
@@ -1039,6 +1124,36 @@ namespace MiniSoftware
                 runPro.Append(shading);
                 runPro.Append(color);
                 run.Append(runPro);
+                run.Append(text);
+            }
+        }
+
+        /// <summary>
+        /// Thêm chuỗi rich-text (từ BBCode convert) vào run: mỗi segment một Run riêng với
+        /// RunProperties (bold/italic/underline/strike/color) + Break giữa các đoạn.
+        /// </summary>
+        private static void AddRichText(Run run, MiniWordRichText[] segments)
+        {
+            foreach (var seg in segments)
+            {
+                if (seg.NewLineBefore)
+                    run.Append(new Break());
+
+                var runPro = new RunProperties();
+                if (seg.Bold)
+                    runPro.Append(new Bold());
+                if (seg.Italic)
+                    runPro.Append(new Italic());
+                if (seg.Underline)
+                    runPro.Append(new Underline());
+                if (seg.Strike)
+                    runPro.Append(new Strike());
+                if (!string.IsNullOrEmpty(seg.Color))
+                    runPro.Append(new Color() { Val = seg.Color.Replace("#", "") });
+
+                var text = new Text(seg.Text) { Space = SpaceProcessingModeValues.Preserve };
+                if (runPro.HasChildren)
+                    run.Append(runPro);
                 run.Append(text);
             }
         }
