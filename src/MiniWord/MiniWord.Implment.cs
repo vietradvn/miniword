@@ -102,7 +102,16 @@ namespace MiniSoftware
                 innerText = Regex.Replace(innerText, @"\{\{TableEnd:\w+\}\}", "");
 
                 // 匹配list数据，格式"Items.PropName"
-                var matchs = (Regex.Matches(innerText, "(?<={{).*?\\..*?(?=}})")
+                //
+                // [^{}] chứ KHÔNG phải . — nếu dùng `.*?` thì match được phép đi xuyên qua
+                // `}}` rồi `{{`, nên hai placeholder thường nằm hai bên một dấu chấm của văn
+                // bản (vd ô có tiêu đề đánh số "2. Van động mạch chủ") bị ghép thành một
+                // "list key" giả: `{{a}} 2. text {{b}}` → "a}} 2. text {{b". Hậu quả:
+                //   - đủ 3 khoá giả trong một hàng → ném NotSupportedException "more than 2 list";
+                //   - hoặc `{{x}}{{Items.Name}}` → khoá thành "x}}{{Items.Name", GetObjVal trả
+                //     null → hàng render trống mà không báo lỗi.
+                // Giới hạn trong một cặp {{...}} khiến match chỉ còn là placeholder thật.
+                var matchs = (Regex.Matches(innerText, @"(?<=\{\{)[^{}]*?\.[^{}]*?(?=\}\})")
                     .Cast<Match>().GroupBy(x => x.Value).Select(varGroup => varGroup.First().Value)).ToArray();
                 if (matchs.Length > 0)
                 {
@@ -196,7 +205,10 @@ namespace MiniSoftware
                 }
                 else
                 {
-                    var matchTxtProp = new Regex(@"(?<={{).*?\.?.*?(?=}})").Match(innerText);
+                    // Chỉ dùng .Success để hỏi "hàng này có placeholder nào không" — nhưng vẫn
+                    // chặn trong một cặp {{...}} như trên, để không Success nhờ đoạn văn bản
+                    // nằm giữa hai placeholder.
+                    var matchTxtProp = new Regex(@"(?<=\{\{)[^{}]*?(?=\}\})").Match(innerText);
                     if (!matchTxtProp.Success) continue;
 
                     ReplaceText(tr, docx, tags);
@@ -265,7 +277,20 @@ namespace MiniSoftware
             foreach (var text in texts)
             {
                 var clear = false;
-                if (text.InnerText.TrimStart().StartsWith("{"))
+
+                // Bắt đầu gom khi run CÓ THỂ mở đầu một thẻ:
+                //   - chứa "{{"        → thẻ bắt đầu ngay trong run này, KỂ CẢ khi có chữ đứng
+                //                        trước nó (vd Word cắt thành 'Họ và tên: {{ho_v' + 'a'
+                //                        + '_ten}' + '}'), hoặc
+                //   - kết thúc bằng "{" → Word cắt đúng giữa hai dấu ngoặc ('…{' + '{tag}}').
+                //
+                // Điều kiện cũ là run phải MỞ ĐẦU bằng '{', nên thẻ bị cắt mà phía trước có
+                // chữ thì không bao giờ được ghép lại → ReplaceText không thấy thẻ nào nguyên
+                // vẹn và {{...}} nằm nguyên trong bản in.
+                //
+                // KHÔNG dùng Contains("{") trơn: một dấu '{' lẻ giữa câu sẽ kéo hàng loạt run
+                // không liên quan vào cùng một pool, rồi bị gộp về định dạng của run đầu.
+                if (!needAppend && (text.InnerText.Contains("{{") || text.InnerText.EndsWith("{")))
                 {
                     needAppend = true;
                 }
@@ -275,10 +300,10 @@ namespace MiniSoftware
                     sb.Append(text.InnerText);
                     pool.Add(text);
 
-                    var s = sb.ToString().TrimStart(); //TODO:
-                    // TODO: check tag exist
-                    // TODO: record tag text if without tag then system need to clear them
-                    // TODO: every {{tag}} one <t>for them</t> and add text before first text and copy first one and remove {{, tagname, }}
+                    // KHÔNG TrimStart: chữ và khoảng trắng đứng trước thẻ là nội dung thật của
+                    // run. Bản cũ trim nên ' {{dia_chi}}' mất dấu cách, in ra dính liền
+                    // "Đại chỉ:123 Nguyễn Huệ".
+                    var s = sb.ToString();
 
                     const string foreachTag = "{{foreach";
                     const string endForeachTag = "endforeach}}";
@@ -291,7 +316,11 @@ namespace MiniSoftware
                                              s.Split(new[] { endForeachTag }, StringSplitOptions.None).Length - 1;
                     var ifTagContains = s.Split(new[] { ifTag }, StringSplitOptions.None).Length - 1 ==
                                         s.Split(new[] { endifTag }, StringSplitOptions.None).Length - 1;
-                    var tagContains = s.StartsWith(tagStart) && s.Contains(tagEnd);
+                    // Thẻ đủ khi có "{{" và một "}}" nằm SAU nó — không còn đòi s phải bắt đầu
+                    // bằng "{{" nữa vì s giờ được phép mang phần chữ đứng trước.
+                    var tagStartIdx = s.IndexOf(tagStart, StringComparison.Ordinal);
+                    var tagContains = tagStartIdx >= 0 &&
+                                      s.IndexOf(tagEnd, tagStartIdx + tagStart.Length, StringComparison.Ordinal) >= 0;
 
                     if (foreachTagContains && ifTagContains && tagContains)
                     {
@@ -300,6 +329,9 @@ namespace MiniSoftware
                             var first = pool.First();
                             var newText = first.Clone() as Text;
                             newText.Text = s;
+                            // Giữ khoảng trắng đầu/cuối — thiếu xml:space="preserve" thì Word
+                            // tự nuốt, đúng chỗ dấu cách trước {{...}} hay bị mất.
+                            newText.Space = SpaceProcessingModeValues.Preserve;
                             first.Parent.InsertBefore(newText, first);
                             foreach (var t in pool)
                             {
@@ -307,6 +339,12 @@ namespace MiniSoftware
                             }
                         }
 
+                        clear = true;
+                    }
+                    else if (sb.Length > 1000)
+                    {
+                        // Gom mãi không thành thẻ (dấu '{' lẻ, thẻ hỏng…) — buông pool ra để
+                        // không nuốt nốt phần còn lại của tài liệu và bỏ sót các thẻ phía sau.
                         clear = true;
                     }
                 }
