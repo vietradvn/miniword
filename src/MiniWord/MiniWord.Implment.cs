@@ -123,18 +123,35 @@ namespace MiniSoftware
                     //var listKey = listKeys[0];
 
                     var listLevelKeys = matchs.Select(s => s.Substring(0, s.LastIndexOf('.'))).Distinct().ToArray();
-                    // TODO:
-                    // not support > 2 list in same tr
-                    if (listLevelKeys.Length > 2)
+
+                    // Prefix của thẻ chấm chỉ là KHÔNG GIAN TÊN, không đương nhiên là danh sách.
+                    // Chỉ prefix trỏ vào danh sách bản ghi thật mới được nhân bản hàng.
+                    //
+                    // Trước đây chỗ này chỉ hỏi `tagObj is IEnumerable`, mà Dictionary cũng là
+                    // IEnumerable<KeyValuePair> — nên {{patient.name}} đặt trong ô bảng làm hàng
+                    // bị NHÂN BẢN THEO SỐ FIELD của object patient (14 field ⇒ 14 hàng), im lặng.
+                    // Hậu quả: mọi thẻ chấm đều bị cấm trong ô bảng, và người dựng mẫu buộc phải
+                    // viết TransformScript chỉ để copy giá trị ra biến phẳng.
+                    //
+                    // Giới hạn "2 list mỗi hàng" cũng đếm nhầm vì thế: một hàng tiêu đề có
+                    // {{patient.name}} + {{exam.x}} + {{order.y}} là ném NotSupportedException
+                    // dù chẳng có danh sách nào. Giờ chỉ đếm danh sách thật.
+                    var repeatKeys = listLevelKeys.Where(k => IsRepeatableList(GetObjVal(tags, k))).ToArray();
+                    if (repeatKeys.Length > 2)
                         throw new NotSupportedException("MiniWord doesn't support more than 2 list in same row");
 
-                    var tagObj = GetObjVal(tags, listLevelKeys[0]);
+                    // Không có danh sách nào ⇒ để nguyên hàng. ReplaceIfStatements + ReplaceText
+                    // chạy sau GenerateTable trên toàn bộ tài liệu (xem SaveAsByTemplateImpl) sẽ
+                    // điền thẻ chấm y hệt một đoạn văn ngoài bảng.
+                    if (repeatKeys.Length == 0) continue;
+
+                    var listLevelKey = repeatKeys[0];
+                    var tagObj = GetObjVal(tags, listLevelKey);
 
                     if (tagObj == null) continue;
 
                     if (tagObj is IEnumerable)
                     {
-                        var attributeKey = matchs[0].Split('.')[0];
                         var list = tagObj as IEnumerable;
 
                         foreach (var item in list)
@@ -148,7 +165,7 @@ namespace MiniSoftware
                                 var es = (Dictionary<string, object>)item;
                                 foreach (var e in es)
                                 {
-                                    var dicKey = $"{listLevelKeys[0]}.{e.Key}";
+                                    var dicKey = $"{listLevelKey}.{e.Key}";
                                     dic[dicKey] = e.Value;
                                 }
                             }
@@ -158,7 +175,7 @@ namespace MiniSoftware
                                 var props = item.GetType().GetProperties();
                                 foreach (var p in props)
                                 {
-                                    var dicKey = $"{listLevelKeys[0]}.{p.Name}";
+                                    var dicKey = $"{listLevelKey}.{p.Name}";
                                     dic[dicKey] = p.GetValue(item);
                                 }
                             }
@@ -167,7 +184,7 @@ namespace MiniSoftware
 
                             // Remove {{TableStart:key}} and {{TableEnd:key}} tags from the cloned row
                             // These tags are markers, not data placeholders
-                            RemoveTableTags(newTr, listLevelKeys[0]);
+                            RemoveTableTags(newTr, listLevelKey);
 
                             ReplaceText(newTr, docx, tags: dic);
                             //Fix #47 The table should be inserted at the template tag position instead of the last row
@@ -191,14 +208,14 @@ namespace MiniSoftware
                         var props = tagObj.GetType().GetProperties();
                         foreach (var p in props)
                         {
-                            var dicKey = $"{listLevelKeys[0]}.{p.Name}";
+                            var dicKey = $"{listLevelKey}.{p.Name}";
                             dic[dicKey] = p.GetValue(tagObj);
                         }
 
                         ReplaceIfStatements(tr, tags: tagObj.ToDictionary());
 
                         // Remove {{TableStart:key}} and {{TableEnd:key}} tags
-                        RemoveTableTags(tr, listLevelKeys[0]);
+                        RemoveTableTags(tr, listLevelKey);
 
                         ReplaceText(tr, docx, tags: dic);
                     }
@@ -216,6 +233,14 @@ namespace MiniSoftware
             }
         }
 
+
+        /// <summary>
+        /// Danh sách bản ghi THẬT (List/array) — khác Dictionary (object lồng, chỉ là không gian
+        /// tên của thẻ chấm) và string (IEnumerable&lt;char&gt;, lặp theo ký tự thì vô nghĩa).
+        /// </summary>
+        // netstandard2.0 của MiniWord build bằng C# 7.3 — không có `is not`.
+        private static bool IsRepeatableList(object val)
+            => val is IEnumerable && !(val is IDictionary) && !(val is string);
 
         /// <summary>
         /// 获取Obj对象指定的值
