@@ -17,5 +17,11 @@ namespace MiniSoftware
         public string Color { get; set; }
         /// <summary>Thêm ngắt dòng (Break) TRƯỚC segment — dùng cho list item và \n trong text.</summary>
         public bool NewLineBefore { get; set; }
+        /// <summary>
+        /// Căn lề của đoạn chứa segment: "left" | "center" | "right" | "justify".
+        /// Alignment là thuộc tính paragraph chứ không phải run, nên AddRichText đặt nó lên
+        /// ParagraphProperties của đoạn chứa placeholder (bug TC 14 — mẫu in mất căn giữa/căn phải).
+        /// </summary>
+        public string Align { get; set; }
     }
 }

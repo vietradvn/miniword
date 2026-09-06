@@ -1154,33 +1154,129 @@ namespace MiniSoftware
         }
 
         /// <summary>
-        /// Thêm chuỗi rich-text (từ BBCode convert) vào run: mỗi segment một Run riêng với
-        /// RunProperties (bold/italic/underline/strike/color) + Break giữa các đoạn.
+        /// Thêm chuỗi rich-text (từ BBCode convert) vào paragraph chứa <paramref name="run"/>:
+        /// MỖI SEGMENT MỘT <see cref="Run"/> RIÊNG, chèn ngay sau run placeholder.
+        ///
+        /// Trước đây tất cả segment bị nhồi vào cùng một Run (nhiều rPr + nhiều Text trong 1 run).
+        /// OOXML chỉ cho phép tối đa một w:rPr mỗi w:r và nó áp cho TOÀN BỘ text của run, nên:
+        ///  - segment không định dạng thừa hưởng rPr của segment trước → định dạng lan sang chữ và
+        ///    dòng phía sau (bug TC 14/15/16/18);
+        ///  - rPr của segment thứ 2 trở đi nằm SAU Text của segment trước, sai vị trí schema
+        ///    (rPr phải là con đầu tiên của run) → định dạng bị bỏ qua hoàn toàn (bug TC 19).
+        ///
+        /// rPr gốc của run placeholder được clone làm nền cho từng segment để giữ font/cỡ chữ
+        /// đã cấu hình trong file DOCX mẫu (bug TC 21 — mất font Times New Roman).
         /// </summary>
         private static void AddRichText(Run run, MiniWordRichText[] segments)
         {
+            var baseProps = run.GetFirstChild<RunProperties>();
+            var parent = run.Parent;
+
+            ApplyRichTextAlignment(run, segments);
+
+            OpenXmlElement anchor = run;
             foreach (var seg in segments)
             {
+                var segRun = new Run();
+
+                // rPr LUÔN là con đầu tiên của run, nền là rPr của placeholder (font/cỡ chữ mẫu).
+                var runPro = baseProps != null
+                    ? (RunProperties)baseProps.CloneNode(true)
+                    : new RunProperties();
+                ApplyRichTextFormat(runPro, seg);
+                segRun.Append(runPro);
+
                 if (seg.NewLineBefore)
-                    run.Append(new Break());
+                    segRun.Append(new Break());
 
-                var runPro = new RunProperties();
-                if (seg.Bold)
-                    runPro.Append(new Bold());
-                if (seg.Italic)
-                    runPro.Append(new Italic());
-                if (seg.Underline)
-                    runPro.Append(new Underline());
-                if (seg.Strike)
-                    runPro.Append(new Strike());
-                if (!string.IsNullOrEmpty(seg.Color))
-                    runPro.Append(new Color() { Val = seg.Color.Replace("#", "") });
+                segRun.Append(new Text(seg.Text ?? string.Empty) { Space = SpaceProcessingModeValues.Preserve });
 
-                var text = new Text(seg.Text) { Space = SpaceProcessingModeValues.Preserve };
-                if (runPro.HasChildren)
-                    run.Append(runPro);
-                run.Append(text);
+                if (parent == null)
+                {
+                    // Không có parent (trường hợp lạ) → giữ hành vi cũ để không mất nội dung.
+                    run.Append(segRun);
+                }
+                else
+                {
+                    parent.InsertAfter(segRun, anchor);
+                    anchor = segRun;
+                }
             }
+        }
+
+        /// <summary>
+        /// Áp bold/italic/underline/strike/color của segment lên rPr đã clone từ placeholder.
+        /// Xóa phần tử cùng loại có sẵn trước khi thêm — tránh trùng thẻ khi mẫu DOCX đã in đậm sẵn.
+        /// </summary>
+        private static void ApplyRichTextFormat(RunProperties runPro, MiniWordRichText seg)
+        {
+            RemoveRunProperty<Bold>(runPro);
+            RemoveRunProperty<Italic>(runPro);
+            RemoveRunProperty<Underline>(runPro);
+            RemoveRunProperty<Strike>(runPro);
+
+            if (seg.Bold)
+                runPro.Append(new Bold());
+            if (seg.Italic)
+                runPro.Append(new Italic());
+            if (seg.Underline)
+                runPro.Append(new Underline() { Val = UnderlineValues.Single });
+            if (seg.Strike)
+                runPro.Append(new Strike());
+            if (!string.IsNullOrEmpty(seg.Color))
+            {
+                RemoveRunProperty<Color>(runPro);
+                runPro.Append(new Color() { Val = seg.Color.Replace("#", "") });
+            }
+        }
+
+        private static void RemoveRunProperty<T>(RunProperties runPro) where T : OpenXmlElement
+        {
+            foreach (var existing in runPro.Elements<T>().ToArray())
+                existing.Remove();
+        }
+
+        /// <summary>
+        /// Đặt căn lề cho paragraph chứa placeholder. Alignment là thuộc tính paragraph nên không
+        /// thể biểu diễn ở mức run — segment đầu tiên có Align quyết định cả đoạn.
+        /// </summary>
+        private static void ApplyRichTextAlignment(Run run, MiniWordRichText[] segments)
+        {
+            string align = null;
+            foreach (var seg in segments)
+            {
+                if (!string.IsNullOrEmpty(seg.Align))
+                {
+                    align = seg.Align;
+                    break;
+                }
+            }
+            if (align == null)
+                return;
+
+            var paragraph = run.Ancestors<Paragraph>().FirstOrDefault();
+            if (paragraph == null)
+                return;
+
+            JustificationValues just;
+            switch (align.ToLowerInvariant())
+            {
+                case "center": just = JustificationValues.Center; break;
+                case "right": just = JustificationValues.Right; break;
+                case "justify": just = JustificationValues.Both; break;
+                case "left": just = JustificationValues.Left; break;
+                default: return;
+            }
+
+            var pPr = paragraph.GetFirstChild<ParagraphProperties>();
+            if (pPr == null)
+            {
+                pPr = new ParagraphProperties();
+                paragraph.InsertAt(pPr, 0);
+            }
+            foreach (var existing in pPr.Elements<Justification>().ToArray())
+                existing.Remove();
+            pPr.Append(new Justification() { Val = just });
         }
 
         private static void AddPicture(OpenXmlElement appendElement, string relationshipId, MiniWordPicture pic)
