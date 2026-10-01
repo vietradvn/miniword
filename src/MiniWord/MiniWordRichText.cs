@@ -23,5 +23,28 @@ namespace MiniSoftware
         /// ParagraphProperties của đoạn chứa placeholder (bug TC 14 — mẫu in mất căn giữa/căn phải).
         /// </summary>
         public string Align { get; set; }
+        /// <summary>
+        /// Font riêng của segment (null = giữ font của placeholder). Dùng cho ký hiệu chỉ đúng hình trong một font
+        /// nhất định — vd gạch đầu dòng chuẩn của Word là U+F0B7 trong font "Symbol".
+        /// </summary>
+        public string FontFamily { get; set; }
+
+        /// <summary>
+        /// Segment này mở một ĐOẠN (paragraph) mới thay vì nối tiếp đoạn hiện tại. Đoạn mới chép định dạng đoạn
+        /// của placeholder (font/giãn dòng/căn lề…); <see cref="Align"/>, <see cref="IndentLeftTwips"/>,
+        /// <see cref="IndentHangingTwips"/> của CHÍNH segment này là định dạng riêng của đoạn đó. Dùng cho mục
+        /// danh sách: mỗi mục một đoạn thụt treo thì dòng xuống hàng thẳng dưới chữ chứ không về sát lề.
+        /// Không segment nào bật cờ này ⇒ giữ hành vi cũ (mọi thứ trong đoạn của placeholder).
+        /// </summary>
+        public bool NewParagraphBefore { get; set; }
+
+        /// <summary>Lề trái của đoạn (twip, cộng thêm vào lề sẵn có của đoạn placeholder) — chỉ đọc khi <see cref="NewParagraphBefore"/>.</summary>
+        public int? IndentLeftTwips { get; set; }
+
+        /// <summary>
+        /// Thụt treo của đoạn (twip): dòng đầu bắt đầu lùi ra <c>IndentLeft - Hanging</c>, các dòng sau ở <c>IndentLeft</c>.
+        /// Kèm tab stop tại <c>IndentLeft</c> để "\t" sau ký hiệu nhảy đúng tới chỗ bắt đầu chữ.
+        /// </summary>
+        public int? IndentHangingTwips { get; set; }
     }
 }

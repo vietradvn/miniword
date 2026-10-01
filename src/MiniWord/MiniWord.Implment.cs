@@ -1184,11 +1184,38 @@ namespace MiniSoftware
             var baseProps = run.GetFirstChild<RunProperties>();
             var parent = run.Parent;
 
-            ApplyRichTextAlignment(run, segments);
+            // Tách đoạn chỉ khi placeholder nằm thẳng trong một paragraph (không trong hyperlink/field…).
+            var placeholderParagraph = parent as Paragraph;
+            var splitParagraphs = placeholderParagraph != null && segments.Any(s => s.NewParagraphBefore);
+            if (!splitParagraphs)
+                ApplyRichTextAlignment(run, segments);
+
+            // Định dạng đoạn GỐC của mẫu, chụp trước khi sửa — đoạn tách ra chép từ bản này.
+            var templatePPr = placeholderParagraph?.ParagraphProperties?.CloneNode(true) as ParagraphProperties;
+            // Nội dung đứng SAU placeholder trong cùng đoạn (vd chữ tĩnh) phải theo xuống đoạn cuối cùng.
+            var trailing = splitParagraphs ? run.ElementsAfter().ToList() : null;
+            var currentHasContent = splitParagraphs && run.ElementsBefore().Any(HasVisibleContent);
+            var current = placeholderParagraph;
+            var created = new List<Paragraph>();
 
             OpenXmlElement anchor = run;
             foreach (var seg in segments)
             {
+                if (splitParagraphs && seg.NewParagraphBefore)
+                {
+                    // Đoạn hiện tại chưa có chữ (placeholder đứng đầu đoạn) ⇒ dùng luôn, không để lại đoạn trống.
+                    if (currentHasContent)
+                    {
+                        var paragraph = new Paragraph();
+                        if (templatePPr != null)
+                            paragraph.Append(templatePPr.CloneNode(true));
+                        current.InsertAfterSelf(paragraph);
+                        current = paragraph;
+                        created.Add(paragraph);
+                    }
+                    ApplyParagraphFormat(current, seg, templatePPr);
+                }
+
                 var segRun = new Run();
 
                 // rPr LUÔN là con đầu tiên của run, nền là rPr của placeholder (font/cỡ chữ mẫu).
@@ -1201,18 +1228,139 @@ namespace MiniSoftware
                 if (seg.NewLineBefore)
                     segRun.Append(new Break());
 
-                segRun.Append(new Text(seg.Text ?? string.Empty) { Space = SpaceProcessingModeValues.Preserve });
+                AppendTextWithTabs(segRun, seg.Text ?? string.Empty);
 
                 if (parent == null)
                 {
                     // Không có parent (trường hợp lạ) → giữ hành vi cũ để không mất nội dung.
                     run.Append(segRun);
                 }
+                else if (current != placeholderParagraph)
+                {
+                    current.Append(segRun);
+                }
                 else
                 {
                     parent.InsertAfter(segRun, anchor);
                     anchor = segRun;
                 }
+                currentHasContent = true;
+            }
+
+            if (created.Count > 0)
+            {
+                foreach (var element in trailing)
+                {
+                    element.Remove();
+                    created[created.Count - 1].Append(element);
+                }
+                CollapseSplitSpacing(placeholderParagraph, created);
+            }
+        }
+
+        private static bool HasVisibleContent(OpenXmlElement element) =>
+            !(element is ParagraphProperties)
+            && (element.Descendants<Text>().Any(t => t.Text.Length > 0)
+                || element.Descendants<Drawing>().Any()
+                || element.Descendants<TabChar>().Any());
+
+        /// <summary>"\t" trong text phải thành &lt;w:tab/&gt; — ký tự tab nằm trong &lt;w:t&gt; không được coi là tab.</summary>
+        private static void AppendTextWithTabs(Run segRun, string text)
+        {
+            var parts = text.Split('\t');
+            for (var i = 0; i < parts.Length; i++)
+            {
+                if (i > 0)
+                    segRun.Append(new TabChar());
+                if (parts[i].Length > 0 || parts.Length == 1)
+                    segRun.Append(new Text(parts[i]) { Space = SpaceProcessingModeValues.Preserve });
+            }
+        }
+
+        /// <summary>
+        /// Định dạng riêng của một đoạn tách ra: căn lề, và thụt treo + tab stop cho mục danh sách. Lề thụt cộng
+        /// thêm vào lề sẵn có của đoạn mẫu (mẫu thụt cả khối thì danh sách thụt theo).
+        /// </summary>
+        private static void ApplyParagraphFormat(Paragraph paragraph, MiniWordRichText seg, ParagraphProperties templatePPr)
+        {
+            var pPr = paragraph.ParagraphProperties;
+            if (pPr == null)
+            {
+                pPr = new ParagraphProperties();
+                paragraph.InsertAt(pPr, 0);
+            }
+
+            var just = ToJustification(seg.Align);
+            if (just != null)
+            {
+                foreach (var existing in pPr.Elements<Justification>().ToArray())
+                    existing.Remove();
+                pPr.AddChild(new Justification { Val = just.Value });
+            }
+
+            if (seg.IndentLeftTwips is int left)
+            {
+                var templateLeft = ParseTwips(templatePPr?.Indentation?.Left?.Value ?? templatePPr?.Indentation?.Start?.Value);
+                var textLeft = templateLeft + left;
+                var hanging = seg.IndentHangingTwips ?? 0;
+
+                foreach (var existing in pPr.Elements<Indentation>().ToArray())
+                    existing.Remove();
+                pPr.AddChild(new Indentation { Left = textLeft.ToString(), Hanging = hanging.ToString() });
+
+                foreach (var existing in pPr.Elements<Tabs>().ToArray())
+                    existing.Remove();
+                pPr.AddChild(new Tabs(new TabStop { Val = TabStopValues.Left, Position = textLeft }));
+            }
+        }
+
+        /// <summary>
+        /// Các đoạn tách ra vẫn đọc như MỘT khối liền: bỏ khoảng cách trước/sau GIỮA chúng (kể cả khoảng cách mặc
+        /// định của style), chỉ giữ "trước" của đoạn đầu và "sau" của đoạn cuối như đoạn mẫu ban đầu.
+        /// </summary>
+        private static void CollapseSplitSpacing(Paragraph first, List<Paragraph> created)
+        {
+            var originalAfter = first.ParagraphProperties?.SpacingBetweenLines?.After?.Value;
+            SetSpacing(first, before: null, after: "0");
+            for (var i = 0; i < created.Count; i++)
+            {
+                var isLast = i == created.Count - 1;
+                SetSpacing(created[i], before: "0", after: isLast ? originalAfter : "0");
+            }
+        }
+
+        private static void SetSpacing(Paragraph paragraph, string before, string after)
+        {
+            var pPr = paragraph.ParagraphProperties;
+            if (pPr == null)
+            {
+                pPr = new ParagraphProperties();
+                paragraph.InsertAt(pPr, 0);
+            }
+            var spacing = pPr.SpacingBetweenLines;
+            if (spacing == null)
+            {
+                spacing = new SpacingBetweenLines();
+                pPr.AddChild(spacing);
+            }
+            if (before != null) spacing.Before = before;
+            // after == null ⇒ đoạn mẫu không khai — bỏ để style quyết định như ban đầu.
+            if (after != null) spacing.After = after;
+            else spacing.After = null;
+        }
+
+        private static int ParseTwips(string value) =>
+            int.TryParse(value, out var twips) ? twips : 0;
+
+        private static JustificationValues? ToJustification(string align)
+        {
+            switch (align?.ToLowerInvariant())
+            {
+                case "center": return JustificationValues.Center;
+                case "right": return JustificationValues.Right;
+                case "justify": return JustificationValues.Both;
+                case "left": return JustificationValues.Left;
+                default: return null;
             }
         }
 
@@ -1239,6 +1387,23 @@ namespace MiniSoftware
             {
                 RemoveRunProperty<Color>(runPro);
                 runPro.Append(new Color() { Val = seg.Color.Replace("#", "") });
+            }
+            if (!string.IsNullOrEmpty(seg.FontFamily))
+            {
+                RemoveRunProperty<RunFonts>(runPro);
+                var fonts = new RunFonts
+                {
+                    Ascii = seg.FontFamily,
+                    HighAnsi = seg.FontFamily,
+                    ComplexScript = seg.FontFamily,
+                    EastAsia = seg.FontFamily,
+                };
+                // rFonts đứng ngay sau rStyle (hoặc đầu rPr) theo schema — Word báo file hỏng nếu sai thứ tự.
+                var style = runPro.GetFirstChild<RunStyle>();
+                if (style != null)
+                    style.InsertAfterSelf(fonts);
+                else
+                    runPro.PrependChild(fonts);
             }
         }
 
