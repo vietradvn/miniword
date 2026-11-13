@@ -610,15 +610,20 @@ namespace MiniSoftware
         /// <param name="tags"></param>
         private static void ReplaceText(Paragraph p, WordprocessingDocument docx, Dictionary<string, object> tags)
         {
-            var runs = p.Descendants<Run>().ToArray();
+            // Hàng đợi chứ không phải mảng chụp sẵn: tách thẻ ra run riêng (IsolatePlaceholder) sinh run
+            // mới chứa phần chữ sau thẻ — run đó phải được thay thẻ tiếp như mọi run khác.
+            var pending = new Queue<Run>(p.Descendants<Run>());
 
-            foreach (var run in runs)
+            while (pending.Count > 0)
             {
+                var run = pending.Dequeue();
                 var texts = run.Descendants<Text>().ToArray();
                 if (texts.Length == 0)
                     continue;
                 foreach (Text t in texts)
                 {
+                    // Run sau thẻ (nếu có tách) — các Text còn lại của run đã chuyển sang đó.
+                    Run tail = null;
                     foreach (var tag in tags)
                     {
                         // 完全匹配
@@ -647,6 +652,20 @@ namespace MiniSoftware
                         {
                             var key = isFullMatch ? tag.Key : partMatch.Groups[1].Value;
                             var value = isFullMatch ? tag.Value : GetObjVal(tags, key);
+
+                            // Các nhánh dưới đây (link, rich text, chữ màu, ảnh) chèn nội dung vào run rồi
+                            // xoá cả <w:t> chứa thẻ. Chữ tĩnh gõ chung <w:t> với thẻ — "KẾT LUẬN: {{ket_luan}}" —
+                            // sẽ mất theo, và những gì đứng sau <w:t> trong run bị đẩy ra sau nội dung chèn.
+                            // Tách trước để run chỉ còn đúng thẻ.
+                            if (IsHyperLink(value)
+                                || value is MiniWordRichText || value is MiniWordRichText[]
+                                || value is MiniWordColorText || value is MiniWordColorText[]
+                                || value is IEnumerable<MiniWordPicture> || value is MiniWordPicture)
+                            {
+                                tail = IsolatePlaceholder(run, t, "{{" + key + "}}", out var prefixRun) ?? tail;
+                                if (prefixRun != null)
+                                    pending.Enqueue(prefixRun);
+                            }
 
                             if (value is string[] || value is IList<string> || value is List<string>)
                             {
@@ -848,8 +867,81 @@ namespace MiniSoftware
                             t.Remove();
                         }
                     }
+
+                    if (tail != null)
+                    {
+                        pending.Enqueue(tail);
+                        break;
+                    }
                 }
             }
+        }
+
+        /// <summary>
+        /// Tách <paramref name="run"/> quanh thẻ <paramref name="placeholder"/> trong <paramref name="t"/> để run chỉ còn
+        /// rPr + đúng thẻ: phần đứng trước (phần tử con trước <paramref name="t"/> và chữ trước thẻ) sang run mới chèn
+        /// trước, phần đứng sau sang run mới chèn sau. Cả hai mang bản sao rPr gốc nên hiển thị như cũ.
+        /// Trả về run phía sau (null nếu không có) để thay thẻ tiếp; <paramref name="prefixRun"/> là run chứa chữ
+        /// đứng trước thẻ trong cùng <paramref name="t"/> — có thể còn thẻ chưa thay (thứ tự duyệt tag), nên cũng
+        /// phải thay tiếp. Phần tử đứng trước <paramref name="t"/> đã thay xong, tách riêng để không thay lần hai.
+        /// </summary>
+        private static Run IsolatePlaceholder(Run run, Text t, string placeholder, out Run prefixRun)
+        {
+            prefixRun = null;
+            if (t.Parent != run)
+                return null;
+            var index = t.Text.IndexOf(placeholder, StringComparison.Ordinal);
+            if (index < 0)
+                return null;
+
+            var prefixText = t.Text.Substring(0, index);
+            var suffixText = t.Text.Substring(index + placeholder.Length);
+            var before = t.ElementsBefore().Where(e => !(e is RunProperties)).ToList();
+            var after = t.ElementsAfter().ToList();
+
+            if (before.Count > 0)
+            {
+                var head = CloneRunShell(run);
+                foreach (var element in before)
+                {
+                    element.Remove();
+                    head.Append(element);
+                }
+                run.InsertBeforeSelf(head);
+            }
+
+            if (prefixText.Length > 0)
+            {
+                prefixRun = CloneRunShell(run);
+                prefixRun.Append(new Text(prefixText) { Space = SpaceProcessingModeValues.Preserve });
+                run.InsertBeforeSelf(prefixRun);
+            }
+
+            Run tail = null;
+            if (suffixText.Length > 0 || after.Count > 0)
+            {
+                tail = CloneRunShell(run);
+                if (suffixText.Length > 0)
+                    tail.Append(new Text(suffixText) { Space = SpaceProcessingModeValues.Preserve });
+                foreach (var element in after)
+                {
+                    element.Remove();
+                    tail.Append(element);
+                }
+                run.InsertAfterSelf(tail);
+            }
+
+            t.Text = placeholder;
+            return tail;
+        }
+
+        private static Run CloneRunShell(Run run)
+        {
+            var shell = (Run)run.CloneNode(false);
+            var runProperties = run.GetFirstChild<RunProperties>();
+            if (runProperties != null)
+                shell.Append(runProperties.CloneNode(true));
+            return shell;
         }
 
         private static void ReplaceText(OpenXmlElement xmlElement, WordprocessingDocument docx,
